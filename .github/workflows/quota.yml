@@ -1,0 +1,101 @@
+name: SDRP Resource Sync
+
+on:
+  workflow_dispatch:
+    inputs:
+      tenant_id:
+        description: 'Tenant ID to filter by'
+        required: true
+        type: string
+      prefix:
+        description: 'Resource prefix'
+        required: true
+        type: string
+      key_to_edit:
+        description: 'The YAML key to update (e.g., settings.timeout)'
+        required: true
+        type: string
+      csv_path:
+        description: 'Path to the CSV data file'
+        required: false
+        default: 'data/values.csv'
+        type: string
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    
+    # Mapping sensitive data from GitHub Secrets to Env variables
+    env:
+      ACCOUNT_NAME: ${{ secrets.ACCOUNT_NAME }}
+      ACCOUNT_PASSWORD: ${{ secrets.ACCOUNT_PASSWORD }}
+      RSA_KEY: ${{ secrets.RSA_KEY }}
+      TENANT_ID: ${{ inputs.tenant_id }}
+      PREFIX: ${{ inputs.prefix }}
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Install Python Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyyaml pandas
+
+    - name: Mock/Install SDRP CLI
+      run: |
+        # Replace this with your actual CLI installation steps (e.g., curl, npm install, etc.)
+        echo "Installing sdrp CLI..."
+        # Simulated CLI wrapper for demonstration purposes:
+        echo -e '#!/bin/bash\nif [ "$1" == "query" ]; then echo -e "metadata:\n  tenant: '$TENANT_ID'\nsettings:\n  timeout: 30\n  prefix: '$PREFIX'"; fi' > /usr/local/bin/sdrp
+        chmod +x /usr/local/bin/sdrp
+
+    - name: Create Work Directories
+      run: mkdir -p workspace output
+    - name: "Step 1: Query SDRP CLI & Save YAML"
+      id: query_step
+      run: |
+        echo "Querying SDRP CLI using tenant: $TENANT_ID and prefix: $PREFIX..."
+        
+        # Capture errors gracefully
+        if ! sdrp query --tenant "$TENANT_ID" --prefix "$PREFIX" > workspace/fetched.yaml 2>workspace/cli_err.log; then
+          echo "::error::SDRP Query Failed!"
+          cat workspace/cli_err.log
+          exit 1
+        fi
+        echo "Successfully fetched YAML."
+
+    - name: "Step 2: Process and Edit YAML with Python"
+      id: python_step
+      run: |
+        echo "Running Python modifier script..."
+        
+        if ! python scripts/update_yaml.py \
+          --input workspace/fetched.yaml \
+          --output output/updated.yaml \
+          --csv "${{ inputs.csv_path }}" \
+          --tenant "$TENANT_ID" \
+          --prefix "$PREFIX" \
+          --key "${{ inputs.key_to_edit }}"; then
+          
+          echo "::error::Python YAML manipulation failed!"
+          exit 1
+        fi
+
+    - name: "Step 3: Apply Updated YAML via SDRP CLI"
+      id: apply_step
+      run: |
+        echo "Applying the updated configuration..."
+        
+        if ! sdrp apply -f output/updated.yaml 2>workspace/apply_err.log; then
+          echo "::error::SDRP Apply Failed!"
+          cat workspace/apply_err.log
+          exit 1
+        fi
+        echo "Workflow completed successfully!"
+
